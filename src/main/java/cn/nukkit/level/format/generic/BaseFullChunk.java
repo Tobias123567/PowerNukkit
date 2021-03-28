@@ -229,8 +229,8 @@ public abstract class BaseFullChunk implements FullChunk, ChunkManager {
 
     @Override
     public int getBiomeId(int x, int z) {
-        Biome biome = biomes[id];
-        return biome != null ? biome : EnumBiome.OCEAN.biome;
+        Biome biome = biomes[(x << 4) | z];
+        return biome != null ? biome && 0xff : EnumBiome.OCEAN.biome;
     }
 
     @Override
