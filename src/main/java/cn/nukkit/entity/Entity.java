@@ -11,6 +11,7 @@ import cn.nukkit.block.*;
 import cn.nukkit.blockentity.BlockEntityPistonArm;
 import cn.nukkit.blockstate.BlockState;
 import cn.nukkit.entity.data.*;
+import cn.nukkit.entity.mob.EntityEnderDragon;
 import cn.nukkit.event.Event;
 import cn.nukkit.event.entity.*;
 import cn.nukkit.event.entity.EntityDamageEvent.DamageCause;
@@ -21,6 +22,7 @@ import cn.nukkit.event.player.PlayerTeleportEvent;
 import cn.nukkit.inventory.PlayerInventory;
 import cn.nukkit.inventory.PlayerOffhandInventory;
 import cn.nukkit.item.Item;
+import cn.nukkit.item.ItemID;
 import cn.nukkit.level.*;
 import cn.nukkit.level.format.FullChunk;
 import cn.nukkit.math.*;
@@ -106,11 +108,11 @@ public abstract class Entity extends Location implements Metadatable {
     @Since("1.2.0.0-PN") public static final int DATA_CHARGE_AMOUNT = dynamic(22);
     public static final int DATA_ENDERMAN_HELD_RUNTIME_ID = dynamic(23); //short
     @PowerNukkitOnly @Since("1.4.0.0-PN") public static final int DATA_CLIENT_EVENT = dynamic(24); //byte
-    
+
     @Deprecated @DeprecationDetails(since = "1.4.0.0-PN", by = "PowerNukkit",
             reason = "Apparently this the ID 24 was reused to represent CLIENT_EVENT but Cloudburst Nukkit is still mapping it as age")
     public static final int DATA_ENTITY_AGE = dynamic(DATA_CLIENT_EVENT); //short
-    
+
     @PowerNukkitOnly @Since("1.4.0.0-PN") public static final int DATA_USING_ITEM = dynamic(25); //byte
     public static final int DATA_PLAYER_FLAGS = dynamic(26); //byte
     @Since("1.2.0.0-PN") public static final int DATA_PLAYER_INDEX = dynamic(27);
@@ -126,7 +128,7 @@ public abstract class Entity extends Location implements Metadatable {
     public static final int DATA_LEAD_HOLDER_EID = dynamic(37); //long
     public static final int DATA_SCALE = dynamic(38); //float
     @Since("1.4.0.0-PN") public static final int DATA_INTERACTIVE_TAG = dynamic(39); //string (button text)
-    
+
     @PowerNukkitOnly @Since("1.2.0.0-PN")
     @Deprecated @DeprecationDetails(
             by = "PowerNukkit", since = "1.4.0.0-PN",
@@ -134,7 +136,7 @@ public abstract class Entity extends Location implements Metadatable {
                     "and Nukkit added this constant with a different name",
             replaceWith = "DATA_INTERACTIVE_TAG")
     public static final int DATA_HAS_NPC_COMPONENT = dynamic(DATA_INTERACTIVE_TAG); //byte
-    
+
     public static final int DATA_NPC_SKIN_ID = dynamic(40); //string
     public static final int DATA_URL_TAG = dynamic(41); //string
     public static final int DATA_MAX_AIR = dynamic(42); //short
@@ -1172,14 +1174,23 @@ public abstract class Entity extends Location implements Metadatable {
             this.setAbsorption(Math.max(0, this.getAbsorption() + source.getDamage(EntityDamageEvent.DamageModifier.ABSORPTION)));
         }
         setLastDamageCause(source);
-        float health = getHealth() - source.getFinalDamage();
-        if (health < 1 && this.isPlayer) {
+
+        float newHealth = getHealth() - source.getFinalDamage();
+        if (newHealth < 1 && this instanceof Player) {
             if (source.getCause() != DamageCause.VOID && source.getCause() != DamageCause.SUICIDE) {
                 Player p = (Player) this;
-                PlayerOffhandInventory offhandInventory = p.getOffhandInventory();
-                PlayerInventory playerInventory = p.getInventory();
-                if (offhandInventory.getItem(0).getId() == Item.TOTEM || playerInventory.getItemInHand().getId() == Item.TOTEM) {
+                boolean totem = false;
+                if (p.getOffhandInventory().getItem(0).getId() == ItemID.TOTEM) {
+                    p.getOffhandInventory().clear(0);
+                    totem = true;
+                } else if (p.getInventory().getItemInHand().getId() == ItemID.TOTEM) {
+                    p.getInventory().clear(p.getInventory().getHeldItemIndex());
+                    totem = true;
+                }
+                if (totem) {
                     this.getLevel().addLevelEvent(this, LevelEventPacket.EVENT_SOUND_TOTEM);
+                    this.getLevel().addParticleEffect(this, ParticleEffect.TOTEM);
+
                     this.extinguish();
                     this.removeAllEffects();
                     this.setHealth(1);
@@ -1193,18 +1204,13 @@ public abstract class Entity extends Location implements Metadatable {
                     pk.event = EntityEventPacket.CONSUME_TOTEM;
                     p.dataPacket(pk);
 
-                    if (offhandInventory.getItem(0).getId() == Item.TOTEM) {
-                        offhandInventory.clear(0);
-                    } else {
-                        playerInventory.clear(playerInventory.getHeldItemIndex());
-                    }
-
                     source.setCancelled(true);
                     return false;
                 }
             }
         }
-        setHealth(health);
+
+        setHealth(newHealth);
         return true;
     }
 
@@ -1971,7 +1977,9 @@ public abstract class Entity extends Location implements Metadatable {
         return hasWaterAt(this.getEyeHeight());
     }
 
-    private boolean hasWaterAt(float height) {
+    @PowerNukkitOnly
+    @Since("1.4.0.0-PN")
+    protected boolean hasWaterAt(float height) {
         double y = this.y + height;
         Block block = this.level.getBlock(this.temporalVector.setComponents(NukkitMath.floorDouble(this.x), NukkitMath.floorDouble(y), NukkitMath.floorDouble(this.z)));
 
@@ -2297,8 +2305,38 @@ public abstract class Entity extends Location implements Metadatable {
         if (endPortal) {
             if (!inEndPortal) {
                 inEndPortal = true;
-                EntityPortalEnterEvent ev = new EntityPortalEnterEvent(this, PortalType.END);
-                getServer().getPluginManager().callEvent(ev);
+                if (this.getRiding() == null && this.getPassengers().isEmpty() && !(this instanceof EntityEnderDragon)) {
+                    EntityPortalEnterEvent ev = new EntityPortalEnterEvent(this, PortalType.END);
+                    getServer().getPluginManager().callEvent(ev);
+                    
+                    if (!ev.isCancelled() && (level == EnumLevel.OVERWORLD.getLevel() || level == EnumLevel.THE_END.getLevel())) {
+                        final Position newPos = EnumLevel.moveToTheEnd(this);
+                        if (newPos != null) {
+                            if (newPos.getLevel().getDimension() == Level.DIMENSION_THE_END) {
+                                if (teleport(newPos.add(0.5, 1, 0.5), PlayerTeleportEvent.TeleportCause.END_PORTAL)) {
+                                    server.getScheduler().scheduleDelayedTask(new Task() {
+                                        @Override
+                                        public void onRun(int currentTick) {
+                                            // dirty hack to make sure chunks are loaded and generated before spawning player
+                                            teleport(newPos.add(0.5, 1, 0.5), PlayerTeleportEvent.TeleportCause.END_PORTAL);
+                                            BlockEndPortal.spawnObsidianPlatform(newPos);
+                                        }
+                                    }, 5);
+                                }
+                            } else {
+                                if (teleport(newPos, PlayerTeleportEvent.TeleportCause.END_PORTAL)) {
+                                    server.getScheduler().scheduleDelayedTask(new Task() {
+                                        @Override
+                                        public void onRun(int currentTick) {
+                                            // dirty hack to make sure chunks are loaded and generated before spawning player
+                                            teleport(newPos, PlayerTeleportEvent.TeleportCause.END_PORTAL);
+                                        }
+                                    }, 5);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } else {
             inEndPortal = false;
@@ -2718,5 +2756,11 @@ public abstract class Entity extends Location implements Metadatable {
     public void setNoClip(boolean noClip) {
         this.noClip = noClip;
         this.setDataFlag(DATA_FLAGS, DATA_FLAG_HAS_COLLISION, noClip);
+    }
+    
+    @PowerNukkitOnly
+    @Since("1.4.0.0-PN")
+    public boolean isBoss() {
+        return false;
     }
 }
